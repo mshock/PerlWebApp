@@ -2,7 +2,7 @@
 
 # WebApp framework
 
-# TODO: use AppConfig - supports inline .ini comments! (Config::Simple does not, turns out)
+# TODO: continue with AppConfig - verify CLI parsing and precedence
 # try/catch for main execution
 # add CLI flags and logic
 # finish usage w/ optional pod2usage flags and integrate into code
@@ -11,11 +11,11 @@
 # make sure everything is updated to PerlWebApp package (changed name of this project several times. Hey, I'm indecisive!)
 
 #TASK: enter new package name here
+
 package PerlWebApp;
 
 use strict;
-use Config::Simple;
-use Getopt::Std qw(getopt);
+use AppConfig qw(:argcount);
 use Pod::Usage qw(pod2usage);
 use base qw(HTTP::Server::Simple::CGI);
 use HTTP::Server::Simple::Static;
@@ -24,12 +24,9 @@ use constant REGEX_TRUE => qr/^\s*(?:true|(?:t)|(?:y)|yes|(?:1))\s*$/i;
 
 my $package = __PACKAGE__;
 
-my %cfg = ();
+load_conf( my $cfg );
 
-load_conf();
-parse_cli();
-
-my $server = $package->new( $cfg{port} );
+my $server = $package->new( $cfg->port() );
 $server->run();
 
 die "$package server has returned and is no longer running\n";
@@ -53,10 +50,10 @@ sub handle_request {
 	my $path = $cgi->path_info;
 
 	# static serve web directory for css, charts (later, ajax)
-	if ( $path =~ m/\.(css|xls|js|ico)/ ) {
-		$self->serve_static( $cgi, './web' );
-		return;
-	}
+	#	if ( $path =~ m/\.(css|xls|js|ico)/ ) {
+	#		$self->serve_static( $cgi, './web' );
+	#		return;
+	#	}
 
 	if ( $path =~ m/styles\.css/ ) {
 		$self->serve_static( $cgi, './css' );
@@ -66,10 +63,12 @@ sub handle_request {
 
 	}
 
-	write_log(
-			 { type => 'INFO', msg => "$cgi->remote_addr\t$params_string" } );
+	write_log({ type => 'INFO',
+				msg  => "${\$cgi->remote_addr}\t$params_string"
+			  }
+	);
 
-	print `perl portal.pl $params_string`;
+	print qx(perl ${\$cfg->hosted_script()} $params_string);
 }
 
 sub parse_cli {
@@ -84,55 +83,72 @@ sub parse_cli {
 	}
 }
 
+sub define_defaults {
+	my %config_vars = (
+		config_file => { DEFAULT => "$package.conf",
+						 ALIAS   => "cfg_file|conf_file",
+		},
+		server_port => { DEFAULT => 8081,
+						 ALIAS   => 'host_port|port',
+		},
+		server_logfile => { DEFAULT => "server.log",
+							ALIAS   => 'server_log',
+		},
+		default_stylesheet => { DEFAULT => 'styles.css',
+								ALIAS   => 'styles|stylesheet'
+		},
+		default_verbosity => { DEFAULT => 0,
+							   ALIAS   => 'verbosity|verbose|v',
+		},
+		default_enable_logging => { DEFAULT => 1,
+									ALIAS   => 'logging|logging_enabled',
+		},
+		default_log_tz => { DEFAULT => 'local',
+							ALIAS   => 'tz|timezone',
+		},
+		default_hosted_script => {
+			DEFAULT => 'portal.pl',
+			ALIAS   => 'hosted_script|target_script|content_script',
+		}
+	);
+	$cfg->define( $_ => \%{ $config_vars{$_} } ) for keys %config_vars;
+
+}
+
 sub load_conf {
-	my %conf_file = ();
-	Config::Simple->import_from( "$package.conf", \%conf_file )
-		or write_log(
-		{  type => 'WARN',
-		   msg =>
-			   "error(s) in loading config file: $package.conf\tall configs will be default values"
-		}
-		);
 
-	$cfg{port} = $conf_file{'server.port'}
-		or write_log(
-		{  type => 'WARN',
-		   msg =>
-			   'no port specified in config file, using default (typically 8080)'
-		}
-		);
+	$cfg = AppConfig->new( { CREATE => 1,
+							 GLOBAL => { ARGCOUNT => ARGCOUNT_ONE,
+										 DEFAULT  => "<undef>",
+							 },
+						   }
+	);
 
-	$cfg{server_logfile} = $conf_file{'server.logfile'} || "$package.log"
-		and write_log(
-		{  type => 'WARN',
-		   msg =>
-			   "no server logfile specified in configs, using default: $package.log"
-		}
-		);
+	define_defaults();
 
-	$cfg{verbosity}      = $conf_file{verbosity}      || 0;
-	$cfg{enable_logging} = $conf_file{enable_logging} || 1;
-	$cfg{stylesheet}     = $conf_file{stylesheet}     || 'styles.css';
+	$cfg->args();
+	$cfg->file( $cfg->config_file() );
 
 }
 
 sub write_log {
 	my $entry_href = shift;
 
+	return unless $cfg->logging();
+
 	( warn "Passed non-href value to write_log\n" and return )
 		unless ( ref($entry_href) eq 'HASH' );
 
 	my %entry = %{$entry_href};
 
-	open my $log_fh, '>>', $cfg{server_logfile};
-	printf $log_fh "[%s]\t[%s]\t%s\t%s\n", timestamp(), $entry{type},
-		$entry{msg};
+	open my $log_fh, '>>', $cfg->server_log();
+	printf $log_fh "[%s]\t[%s]\t%s\n", timestamp(), $entry{type}, $entry{msg};
 	close $log_fh;
 }
 
 sub timestamp {
 	my @now
-		= $cfg{log_tz} =~ m/(?:GM[T]?|UT[C]?)/i
+		= $cfg->tz() =~ m/(?:GM[T]?|UT[C]?)/i
 		? gmtime(time)
 		: localtime(time);
 	return
@@ -149,7 +165,7 @@ sub usage {
 	pod2usage(
 		{  -msg      => $usage{msg},
 		   -exitval  => $usage{exit_val},
-		   -verbose  => $usage{verbosity} || $cfg{verbosity},
+		   -verbose  => $usage{verbosity} || $cfg->verbosity(),
 		   -sections => $usage{sections},
 
 		}
