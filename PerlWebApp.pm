@@ -2,149 +2,216 @@
 
 # WebApp framework
 
-# TODO: continue with AppConfig - verify CLI parsing and precedence
-# try/catch for main execution
-# add CLI flags and logic
-# finish usage w/ optional pod2usage flags and integrate into code
-# use Exporter?
-# finish static hosting of various filetypes in subdirs
-# make sure everything is updated to PerlWebApp package (changed name of this project several times. Hey, I'm indecisive!)
+# TODO update pod
+# TODO test exporter
+# TODO switch logging to log4perl
+# TODO add basic db handle building framework
 
-#TASK: enter new package name here
+# TASK update package name here
+# TASK rename module and directory to package name
 
 package PerlWebApp;
 
 use strict;
+use feature 'say';
 use AppConfig qw(:argcount);
 use Pod::Usage qw(pod2usage);
-use base qw(HTTP::Server::Simple::CGI);
-use HTTP::Server::Simple::Static;
-
+use Exporter 'import';
 use constant REGEX_TRUE => qr/^\s*(?:true|(?:t)|(?:y)|yes|(?:1))\s*$/i;
+
+# stuff to export to all subscripts
+our @EXPORT = qw(load_conf usage redirect_stderr exec_time @CLI REGEX_TRUE);
+
+# anything used only in a single subscript goes here
+our @EXPORT_OK = qw();
+
+# add the :all tag to Exporter
+our %EXPORT_TAGS = ( all => [ ( @EXPORT, @EXPORT_OK ) ],
+					 min => [qw(redirect_stderr load_conf)] );
+
+# for saving @ARGV values for later consumption
+our @CLI = @ARGV;
+
+# require/use bounce
+# return if being imported as module rather than run directly - also snarky import messages are fun
+if ( my @subscript = caller ) {
+
+	# shut up if this is loaded by the report, you'll screw with the protocol!
+	# otherwise - loud and proud
+	say
+		'imported TQASched module for your very own personal amusement! enjoy, pretty boy.'
+		unless $subscript[1] =~ m/portal/;
+	return 1;
+}
 
 my $package = __PACKAGE__;
 
-load_conf( my $cfg );
+# run all the configuration routines
+# returns a reference to a ref to an AppConfig
+my $cfg = ${ init() };
 
-my $server = $package->new( $cfg->port() );
-$server->run();
+# end of the line if a basic module load/connection test - dryrun
+exit( dryrun(scalar @CLI) ) if $cfg->dryrun;
 
-die "$package server has returned and is no longer running\n";
+# do all the various tasks requested in the config file and CLI args, if any
+execute_tasks();
 
 1;
 
-##############################################################################
-#	subs
-#
-##############################################################################
+#-------------------------------------------------------------------
+#  subs
+#-------------------------------------------------------------------
 
-sub handle_request {
-	my ( $self, $cgi ) = @_;
+# glob all the direct-execution initialization and config routines
+# returns ref to the global AppConfig
+sub init {
 
-	my $params_string = '';
-	for ( $cgi->param ) {
-		$params_string .= sprintf( '--%s="%s" ', $_, $cgi->param($_) )
-			if defined $cgi->param($_);
+	# the ever-powerful and needlessly vigilant config variable - seriously
+	my $cfg = load_conf();
+
+# no verbosity check! too bad i can't unsay what's been say'd, without more effort than it's worth
+# send all these annoying remarks to dev/null, or close as we can get in M$
+# TODO: neither of these methods actually do anything, despite some trying
+	disable_say() unless $cfg->verbose;
+
+	# run in really quiet, super-stealth mode (disable any warnings at all)
+	disable_warn() if !$cfg->enable_warn || !$cfg->verbose;
+
+	# user has requested some help. or wants to read the manpage. fine.
+	usage() if $cfg->help;
+
+	return \$cfg;
+}
+
+
+
+# dryrun exit routine
+# takes optional exit value
+sub dryrun {
+	my ( $num_args, $exit_val ) = @_;
+
+	# assume all is well
+	$exit_val = 0 unless defined $exit_val;
+	my $msg  = '';
+	my $type = 'INFO';
+
+	# insert various tests that all is well here
+	if ( $num_args > 1 ) {
+		$msg
+			= "detected possible unconsumed commandline arguments and no longer hungry\n";
+
+		# if it looks like the user is trying to do anything else
+		# warn and exit(1)
+		$type = 'WARN';
+		$exit_val++;
 	}
+	$msg .= sprintf
+		'dryrun completed in %u seconds. run along now little technomancer',
+		exec_time();
 
-	my $path = $cgi->path_info;
-
-	# static serve web directory for css, charts (later, ajax)
-	#	if ( $path =~ m/\.(css|xls|js|ico)/ ) {
-	#		$self->serve_static( $cgi, './web' );
-	#		return;
-	#	}
-
-	if ( $path =~ m/styles\.css/ ) {
-		$self->serve_static( $cgi, './css' );
-		return;
-	}
-	elsif ( $path =~ m// ) {
-
-	}
-
-	write_log({ type => 'INFO',
-				msg  => "${\$cgi->remote_addr}\t$params_string"
-			  }
+	write_log( { logfile => $cfg->log,
+				 msg     => $msg,
+				 type    => $type,
+			   }
 	);
 
-	print qx(perl ${\$cfg->hosted_script()} $params_string);
+	# I prefer to return the exit value to the exit routine at toplevel
+	# it enforces that the script will exit no matter what if it is a dryrun
+	return $exit_val;
 }
 
-sub parse_cli {
-	my %cli_opts = ();
-	unless ( getopt( 'th', \%cli_opts ) ) {
-		write_log(
-				 { type => 'WARN',
-				   msg  => "aborting... error(s) parsing CLI arguments: @ARGV"
-				 }
-		);
-		usage();
-	}
+# somehow redefine the say feature to shut up
+sub disable_say { }
+
+# somehow turn off warnings... $SIG{WARN} redefine maybe?
+sub disable_warn { }
+
+# do all tasks for this module on direct run
+sub execute_tasks {
+	say 'executing tasks...';
+	server();
 }
-
-sub define_defaults {
-	my %config_vars = (
-		config_file => { DEFAULT => "$package.conf",
-						 ALIAS   => "cfg_file|conf_file",
-		},
-		server_port => { DEFAULT => 8081,
-						 ALIAS   => 'host_port|port',
-		},
-		server_logfile => { DEFAULT => "server.log",
-							ALIAS   => 'server_log',
-		},
-		default_stylesheet => { DEFAULT => 'styles.css',
-								ALIAS   => 'styles|stylesheet'
-		},
-		default_verbosity => { DEFAULT => 0,
-							   ALIAS   => 'verbosity|verbose|v',
-		},
-		default_enable_logging => { DEFAULT => 1,
-									ALIAS   => 'logging|logging_enabled',
-		},
-		default_log_tz => { DEFAULT => 'local',
-							ALIAS   => 'tz|timezone',
-		},
-		default_hosted_script => {
-			DEFAULT => 'portal.pl',
-			ALIAS   => 'hosted_script|target_script|content_script',
-		}
-	);
-	$cfg->define( $_ => \%{ $config_vars{$_} } ) for keys %config_vars;
-
-}
-
 sub load_conf {
+	my ($relative_path) = @_;
 
 	$cfg = AppConfig->new( { CREATE => 1,
+							 ERROR  => \&appconfig_error,
 							 GLOBAL => { ARGCOUNT => ARGCOUNT_ONE,
 										 DEFAULT  => "<undef>",
 							 },
 						   }
 	);
+	require 'Config/config.pl';
 
-	define_defaults();
+	# TODO (INV) using Config namespace could be dangerous
+	Config::define_defaults( \$cfg );
 
-	$cfg->args();
-	$cfg->file( $cfg->config_file() );
+# first pass at CLI args, mostly checking for config file setting (note - consumes @ARGV)
+	$cfg->getopt();
 
+# parse config file for those vivacious variables and their rock steady, dependable values
+	$cfg->file( ( defined $relative_path ? "$relative_path/" : '' )
+				. $cfg->config_file() );
+
+	# second pass at CLI args, they take precedence over config file
+	$cfg->getopt( \@CLI );
+
+	return $cfg;
 }
 
-sub write_log {
-	my $entry_href = shift;
+# handle any errors in AppConfig parsing - namely log them
+sub appconfig_error {
 
-	return unless $cfg->logging();
+	# TODO figure out how to make appconfig error log dynamic
 
-	( warn "Passed non-href value to write_log\n" and return )
-		unless ( ref($entry_href) eq 'HASH' );
-
-	my %entry = %{$entry_href};
-
-	open my $log_fh, '>>', $cfg->server_log();
-	printf $log_fh "[%s]\t[%s]\t%s\n", timestamp(), $entry{type}, $entry{msg};
-	close $log_fh;
+	# hacky way to force always writing this log to top-level dir
+	# despite the calling script's location
+	#	my $top_log = ( __PACKAGE__ ne $package
+	#					? $INC{'TQASched.pm'} =~ s!\w+\.pm!!gr
+	#					: ''
+	#	) . $cfg->log();
+	#
+	#	write_log( { logfile => $top_log,
+	#				 type    => 'WARN',
+	#				 msg     => join( "\t", @_ ),
+	#			   }
+	#	);
 }
+
+sub redirect_stderr {
+	use IO::Handle;
+	my ($error_log) = (@_);
+	open my $err_fh, '>>', $error_log;
+	STDERR->fdopen( $err_fh, 'a' )
+		or warn "failed to pipe errors to logfile:$!\n";
+}
+
+# server to be run in another process
+# hosts the report webmon
+sub server {
+
+	# fork and return process id for shutdown
+	my $server_pid;
+	unless ( $server_pid = fork ) {
+
+		# let's allow the modules CLI args to transfer down
+		exec( '/Server/server.pl', @CLI );
+	}
+	return $server_pid;
+}
+
+
+# daemon to be run in another process
+# polls the AUH and DIS metadata SQL and updates TQASched db
+# see server() for detailed daemonization comments
+sub daemon {
+	my $daemon_pid;
+	unless ( $daemon_pid = fork ) {
+		exec( './Daemon/daemon.pl', @CLI );
+	}
+	return $daemon_pid;
+}
+
 
 sub timestamp {
 	my @now
@@ -158,12 +225,15 @@ sub timestamp {
 		@now[ 3, 2, 1, 0 ];
 }
 
+
+
 sub usage {
 	my $usage_href = shift;
-	my %usage      = %{$usage_href};
+	my %usage      = $usage_href ? %{$usage_href} : ();
 
 	pod2usage(
-		{  -msg      => $usage{msg},
+		{  -input    => 'Docs/usage.pod',
+		   -msg      => $usage{msg},
 		   -exitval  => $usage{exit_val},
 		   -verbose  => $usage{verbosity} || $cfg->verbosity(),
 		   -sections => $usage{sections},
@@ -172,120 +242,3 @@ sub usage {
 	);
 }
 
-=pod
-
-=head1 NAME
-
-PWebApp - a framework for simple hosted Perl applications
-
-=head1 SYNOPSIS
-
-edit the handler to generate HTML (or any TCP/IP) output desired
-usually best to include in another script to make testing easier:
-this allows one to leave the server running while editing the content generation script(s) on the fly
- 
-=head1 DESCRIPTION
-
-this is a basic framework for cobbling together quick and dirty hosted Perl scripts
-definitely nothing fancy and probably not best used for anything external
-but it gets the job done quickly and easily for most simple applications
-	
-=head2 METHODS
-
-=over 12
-
-item C<handle_request>
-
-Content generation script should be called here along with any statically hosted files.
-Also included is a CGI parameter parser which converts CGI args (POST or GET) into a CLI arg string.
-This string can then be passed to content generation scripts and args can be easily parsed using L<Getopt::Long> 
-
-=item C<write_log>
-
-General purpose sub for writing to server log. Useful for debugging based on verbosity level.
-Logging must be enabled (which it is by default)
-Can be disabled in config file or by reducing verbosity level to filter logging by severity
-
-=head3 Log Entry Flavors:
-
-=over 6
-
-=item [INFO]
-
-Basic reporting. Reserved for usage stats and recording normal operations for monitoring.
-
-=item [WARN]
-
-Reports possible errors in execution or configuration but are (expected to be) recoverable.
-Accompanied by a C<warn>ing to STDERR.
-
-=item [ERROR]
-
-Significant execution or configuration errrors are logged under this tag.
-Most likely this was logged immediately prior to the C<die>ing or an outright crash.
-
-=back
-
-=item C<timestamp>
-
-Returns a formatted SQL DateTime-style timestamp for writing to server logfile.
-
-=back
-
-=head2 FILES
-
-=over 12
-
-item F<portal.pl>
-
-Default content generation script.
-CGI args are passed as long CLI args to this script and run in another process.
-Run the server (this module) and then edit this script on the fly to create app.
-
-item F<PWebApp.conf>
-
-Basic .ini config file for setting options.
-Nothing is required in this file it is purely for customization purposes.
-
-item F<css/styles.css>
-
-Stylesheet statically hosted for HTML generation portals.
-Can change the name in configs but all statically hosted files should be kept
-in subdirectories to prevent hosting up cleartext Perl code behind server and 
-content gen script.
-
-item F<js/js.js>
-
-Custom application-specific Javascript code goes in this file.
-It is always loaded in the F<portal.pl> content generation script.
-
-=over 6
-
-item C<Test_JS>
-
-Test function to ensure that any user added Javascript is interpreted OK.
-Of course, the user will be require to make sure any additions actually do what they want =P
-
-=back
-
-item F<js/jquery.js>
-
-L<JQuery library - 1.9.0 | http://code.jquery.com/jquery-1.9.0.js>
-Not loaded automatically in F<portal.pl> due to overhead.
-Incredibly useful library in more complex applications.
-
-=back
-
-=head1 LICENSE
-
-Copyright 2013 Matt Shockley 
-
-This library is free software; you may redistribute it and/or modify
-it under the same terms as Perl itself.
-
-=head1 AUTHOR
-
-Matt Shockley aka mshock 
-L<mshock|http://github.com/mshock>
-
-=cut
